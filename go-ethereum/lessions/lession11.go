@@ -1,0 +1,151 @@
+package lessions
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"fmt"
+	store "go-ethereum/store"
+	"log"
+	"math/big"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
+)
+
+func UseSolidity(client *ethclient.Client) {
+	chaindId, _ := client.NetworkID(context.Background())
+	pri, _ := crypto.HexToECDSA("4f360b3779963dd31921228b734d4153d682b289b192872883bec6551a529a0c")
+	opt, _ := bind.NewKeyedTransactorWithChainID(pri, chaindId)
+
+	tokenAddress, tx, install, _ := store.DeployStore(opt, client, "1.0")
+
+	fmt.Printf("tokenAddress: %v\n", tokenAddress)
+	fmt.Printf("tx.Hash().Hex(): %v\n", tx.Hash().Hex())
+
+	var key [32]byte
+	var value [32]byte
+	copy(key[:], []byte("name"))
+	copy(value[:], []byte("ethereum"))
+
+	tx1, _ := install.SetItem(opt, key, value)
+	fmt.Printf("tx1: %v\n", tx1)
+
+	time.Sleep(10 * time.Second)
+	receipt, err := bind.WaitMined(context.Background(), client, tx1)
+	if err != nil {
+		fmt.Printf("WaitMined err: %v\n", err)
+	}
+	fmt.Printf("receipt.Status: %v\n", receipt.Status)
+
+	value1, _ := install.Items(&bind.CallOpts{Context: context.Background()}, key)
+	fmt.Printf("value1: %v\n", value1 == value)
+}
+
+func UseAbi(client *ethclient.Client) {
+	privateKey, err := crypto.HexToECDSA("4f360b3779963dd31921228b734d4153d682b289b192872883bec6551a529a0c")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 获取公钥地址
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		log.Fatal("error casting public key to ECDSA")
+	}
+	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+	// 获取 nonce
+	nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 估算 gas 价格
+	gasPrice, err := client.SuggestGasPrice(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 准备交易数据
+	contractABI, err := abi.JSON(strings.NewReader(store.StoreABI))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	methodName := "setItem"
+	var key [32]byte
+	var value [32]byte
+
+	copy(key[:], []byte("demo_save_key_use_abi"))
+	copy(value[:], []byte("demo_save_value_use_abi_11111"))
+	input, err := contractABI.Pack(methodName, key, value)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 创建交易并签名交易
+	chainID := big.NewInt(int64(11155111))
+	tx := types.NewTransaction(nonce, common.HexToAddress("0x5a91a01b82c055657377603Ed21e83160076753B"),
+		big.NewInt(0), 300000, gasPrice, input)
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 发送交易
+	err = client.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Transaction sent: %s\n", signedTx.Hash().Hex())
+	_, err = waitForReceipt(client, signedTx.Hash())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 查询刚刚设置的值
+	callInput, err := contractABI.Pack("items", key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	to := common.HexToAddress("0x5a91a01b82c055657377603Ed21e83160076753B")
+	callMsg := ethereum.CallMsg{
+		To:   &to,
+		Data: callInput,
+	}
+
+	// 解析返回值
+	result, err := client.CallContract(context.Background(), callMsg, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var unpacked [32]byte
+	contractABI.UnpackIntoInterface(&unpacked, "items", result)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("is value saving in contract equals to origin value:", unpacked == value)
+}
+
+func waitForReceipt(client *ethclient.Client, txHash common.Hash) (*types.Receipt, error) {
+	for {
+		receipt, err := client.TransactionReceipt(context.Background(), txHash)
+		if err == nil {
+			return receipt, nil
+		}
+		if err != ethereum.NotFound {
+			return nil, err
+		}
+		// 等待一段时间后再次查询
+		time.Sleep(1 * time.Second)
+	}
+}
